@@ -201,8 +201,10 @@ def generate_sankey_image(data, filename, format='svg'):
     fig = go.Figure(data=[go.Sankey(
         node=dict(
             pad=15,
-            thickness=20,
-            line=dict(color="black", width=0.5),
+            # Nodes are thin black bars; the colored links carry the color
+            thickness=2,
+            color="black",
+            line=dict(width=0),
             label=display_labels
         ),
         link=dict(
