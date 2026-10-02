@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import re
+import xml.etree.ElementTree as ET
 from typing import Literal
 
 import pandas as pd
@@ -69,7 +71,7 @@ def application_path(row):
     path = ['Application']
     if total >= 1:
         path.append('HR or Hiring Manager Call')
-    path += [f'Interview {number}' for number in range(2, 2 + numbered_interviews)]
+    path += [f'Interview #{number}' for number in range(2, 2 + numbered_interviews)]
     if row['with_take_home_assignment']:
         path.append('Take-Home Task')
     if row['done_assignment']:
@@ -93,6 +95,69 @@ def create_sankey_df(df):
              for source, target in zip(path, path[1:])]
     links = pd.DataFrame(steps, columns=['Source', 'Target'])
     return links.groupby(['Source', 'Target'], sort=False).size().reset_index(name='Value')
+
+
+WIDTH, HEIGHT = 1200, 700
+MARGIN = dict(l=80, r=80, t=100, b=80)
+SVG_NS = '{http://www.w3.org/2000/svg}'
+
+
+def measure_nodes(fig):
+    """
+    Find where Plotly places each node by rendering the figure to SVG.
+
+    Args:
+        fig (go.Figure): Sankey figure whose node labels are the node indices.
+
+    Returns:
+        dict[int, tuple[float, float, float, float]]: Node index to (x, y, width, height)
+        in pixels, relative to the top-left corner of the plot area.
+    """
+    svg = ET.fromstring(fig.to_image(format='svg', width=WIDTH, height=HEIGHT))
+    boxes = {}
+    for group in svg.iter(f'{SVG_NS}g'):
+        if group.get('class') != 'sankey-node':
+            continue
+        x, y = map(float, re.match(r'translate\(([-\d.]+),([-\d.]+)\)', group.get('transform')).groups())
+        rect = group.find(f'{SVG_NS}rect')
+        index = int(''.join(group.find(f'{SVG_NS}text').itertext()))
+        boxes[index] = (x, y, float(rect.get('width')), float(rect.get('height')))
+    return boxes
+
+
+def label_annotations(boxes, labels):
+    """
+    Build node labels as annotations on a half-transparent white background.
+
+    Labels sit right of their node, except in the last column where they sit left of it.
+
+    Args:
+        boxes (dict): Node boxes as returned by measure_nodes.
+        labels (list[str]): Label text per node index.
+
+    Returns:
+        list[dict]: Plotly layout annotations.
+    """
+    plot_width = WIDTH - MARGIN['l'] - MARGIN['r']
+    plot_height = HEIGHT - MARGIN['t'] - MARGIN['b']
+    last_column_x = max(x for x, _, _, _ in boxes.values())
+    gap = 4
+    annotations = []
+    for index, (x, y, width, height) in boxes.items():
+        in_last_column = x == last_column_x
+        annotations.append(dict(
+            text=labels[index],
+            xref='paper', yref='paper',
+            x=(x - gap if in_last_column else x + width + gap) / plot_width,
+            y=1 - (y + height / 2) / plot_height,
+            xanchor='right' if in_last_column else 'left',
+            yanchor='middle',
+            align='left',
+            showarrow=False,
+            bgcolor='rgba(255,255,255,0.5)',
+            borderpad=3,
+        ))
+    return annotations
 
 
 def generate_sankey_image(data, filename, format='svg'):
@@ -122,7 +187,7 @@ def generate_sankey_image(data, filename, format='svg'):
     # A node's total is its larger side: inflow for outcomes, outflow for the first stage
     inflow = data.groupby('Target')['Value'].sum()
     outflow = data.groupby('Source')['Value'].sum()
-    display_labels = [f"{label} {max(inflow.get(label, 0), outflow.get(label, 0))}"
+    display_labels = [f"{label}<br>total: {max(inflow.get(label, 0), outflow.get(label, 0))}"
                       for label in labels]
 
     # Generate a list of colors with 50% opacity
@@ -155,7 +220,8 @@ def generate_sankey_image(data, filename, format='svg'):
             thickness=2,
             color="black",
             line=dict(width=0),
-            label=display_labels
+            # Placeholder labels identify nodes in the measuring render below
+            label=[str(i) for i in range(len(labels))]
         ),
         link=dict(
             source=sources,
@@ -164,11 +230,17 @@ def generate_sankey_image(data, filename, format='svg'):
             color=link_colors  # Apply the generated colors with opacity
         ))])
 
-    fig.update_layout(title_text="", font_size=10)
+    fig.update_layout(title_text="", font_size=10, margin=MARGIN)
+
+    # Plotly's own node labels can't have a background, so draw them as annotations instead
+    boxes = measure_nodes(fig)
+    fig.update_traces(node_label=[''] * len(labels))
+    fig.update_layout(annotations=label_annotations(boxes, display_labels))
+
     # Save as an image in the chosen format
     # PNG is rendered at 4x so text and links stay sharp
     scale = 1 if format == 'svg' else 4
-    fig.write_image(filename, format=format, width=1200, height=700, scale=scale)
+    fig.write_image(filename, format=format, width=WIDTH, height=HEIGHT, scale=scale)
     print(f"Sankey diagram saved as {filename}")
 
 
