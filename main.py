@@ -1,63 +1,45 @@
+#!/usr/bin/env python3
+
+from typing import Literal
+
 import pandas as pd
-import datetime
-import glob
 import plotly.graph_objects as go
+from tap import Tap
 
 
-def load_csv_file():
+class Args(Tap):
+    input_paths: list[str]  # CSV or TSV files with one row per application; rows of all files are combined
+    format: Literal['png', 'svg'] = 'png'  # Image format of the rendered diagram
+    output: str | None = None  # Path of the rendered image (default: sankey_diagram.<format>)
+
+    def configure(self):
+        self.add_argument('input_paths', nargs='+')
+
+
+def load_applications(input_paths):
     """
-    Search for and load a CSV file from the current directory.
+    Load and combine application rows from CSV or TSV files.
+
+    Args:
+        input_paths (list[str]): Paths to the input files; '.tsv' files are read as tab-separated.
 
     Returns:
-        str: The path to the selected CSV file.
+        pd.DataFrame: One row per application, without 'Diary Update' rows.
     """
-    # Search for all CSV files in the current directory
-    csv_files = glob.glob('*.csv')
-    if csv_files:
-        print("Found the following CSV files:")
-        # Enumerate and display found CSV files
-        for idx, file in enumerate(csv_files):
-            print(f"{idx + 1}: {file}")
-        file_index = input(
-            "Enter the number of the CSV file you want to use, or specify a path: ")
-        try:
-            # Convert input to integer and select file
-            file_index = int(file_index) - 1
-            if file_index >= 0 and file_index < len(csv_files):
-                return csv_files[file_index]
-        except ValueError:
-            return file_index
-    else:
-        return input("No CSV files found in the current directory. Please enter the CSV file path: ")
+    frames = [pd.read_csv(path, sep='\t' if path.lower().endswith('.tsv') else ',')
+              for path in input_paths]
+    df = pd.concat(frames, ignore_index=True)
 
+    # Stage columns are optional; a missing one means no application reached that stage
+    for stage_column in ['Screening Date', 'First Interview', 'Second Interview', 'Third Interview']:
+        if stage_column not in df.columns:
+            df[stage_column] = pd.NA
 
-# Get the current date and time
-current_time = datetime.datetime.now()
-formatted_time = current_time.strftime(
-    "// Generated %d %B %H:%M\n// Go to https://sankeymatic.com/ to use this to generate your Sankey diagram\n")
+    # Normalize column data to title case
+    df['Outcome'] = df['Outcome'].str.title().fillna('Pending')
 
-# Load the CSV file
-csv_path = load_csv_file()
-df = pd.read_csv(csv_path)
-
-# Normalize column data to title case
-df['Outcome'] = df['Outcome'].str.title().fillna('Pending')
-df['Who Applied?'] = df['Who Applied?'].str.title()
-
-# Filter out 'Diary Update' from 'Outcome'
-df = df[df['Outcome'] != 'Diary Update']
-
-# Title case normalization for chosen header columns
-df['Application Exit'] = df['Application Exit'].str.title(
-) if 'Application Exit' in df.columns else None
-df['Screening Exit'] = df['Screening Exit'].str.title(
-) if 'Screening Exit' in df.columns else None
-df['First Interview Exit'] = df['First Interview Exit'].str.title(
-) if 'First Interview Exit' in df.columns else None
-df['Second Interview Exit'] = df['Second Interview Exit'].str.title(
-) if 'Second Interview Exit' in df.columns else None
-df['Third Interview Exit'] = df['Third Interview Exit'].str.title(
-) if 'Third Interview Exit' in df.columns else None
+    # Filter out 'Diary Update' from 'Outcome'
+    return df[df['Outcome'] != 'Diary Update'].copy()
 
 
 def determine_transition(row):
@@ -76,42 +58,39 @@ def determine_transition(row):
     return row['Outcome']
 
 
-# Apply transition determination across the DataFrame
-df['Application Exit'] = df.apply(determine_transition, axis=1)
-df['Screening Exit'] = df.apply(lambda row: 'First Interview' if pd.notna(
-    row['First Interview']) else row['Outcome'], axis=1)
-df['First Interview Exit'] = df.apply(lambda row: 'Second Interview' if pd.notna(
-    row['Second Interview']) else row['Outcome'], axis=1)
-df['Second Interview Exit'] = df.apply(lambda row: 'Third Interview' if pd.notna(
-    row['Third Interview']) else row['Outcome'], axis=1)
-df['Third Interview Exit'] = df['Outcome']
+def summarize_stages(df):
+    """
+    Count where applications go after each stage.
 
-# Count and format transitions for various stages
-application_summary = df['Application Exit'].value_counts().sort_index()
-screening_summary = df.loc[pd.notna(
-    df['Screening Date']), 'Screening Exit'].value_counts().sort_index()
-first_interview_summary = df.loc[pd.notna(
-    df['First Interview']), 'First Interview Exit'].value_counts().sort_index()
-second_interview_summary = df.loc[pd.notna(
-    df['Second Interview']), 'Second Interview Exit'].value_counts().sort_index()
-third_interview_summary = df.loc[pd.notna(
-    df['Third Interview']), 'Third Interview Exit'].value_counts().sort_index()
+    Args:
+        df (pd.DataFrame): Application rows as returned by load_applications.
 
-# Create summary based on 'Who Applied?' column
-totals = df['Who Applied?'].value_counts()
-who_applied_summary = ["I applied to them [{}] Application".format(count) if name == "Me"
-                       else "They applied to me [{}] Application".format(count) for name, count in totals.items()]
+    Returns:
+        tuple[pd.Series, ...]: Exit counts for application, screening and the first, second and third interviews.
+    """
+    # Apply transition determination across the DataFrame
+    df['Application Exit'] = df.apply(determine_transition, axis=1)
+    df['Screening Exit'] = df.apply(lambda row: 'First Interview' if pd.notna(
+        row['First Interview']) else row['Outcome'], axis=1)
+    df['First Interview Exit'] = df.apply(lambda row: 'Second Interview' if pd.notna(
+        row['Second Interview']) else row['Outcome'], axis=1)
+    df['Second Interview Exit'] = df.apply(lambda row: 'Third Interview' if pd.notna(
+        row['Third Interview']) else row['Outcome'], axis=1)
+    df['Third Interview Exit'] = df['Outcome']
 
-# Compile all formatted outputs into one list
-final_output = [formatted_time] + (
-    who_applied_summary +
-    [f"Application [{count}] {exit}" for exit, count in application_summary.items()] +
-    [f"Screening [{count}] {exit}" for exit, count in screening_summary.items()] +
-    [f"First Interview [{count}] {exit}" for exit, count in first_interview_summary.items()] +
-    [f"Second Interview [{count}] {exit}" for exit, count in second_interview_summary.items()] +
-    [f"Third Interview [{count}] {exit}" for exit,
-        count in third_interview_summary.items()]
-)
+    # Count transitions for various stages
+    application_summary = df['Application Exit'].value_counts().sort_index()
+    screening_summary = df.loc[pd.notna(
+        df['Screening Date']), 'Screening Exit'].value_counts().sort_index()
+    first_interview_summary = df.loc[pd.notna(
+        df['First Interview']), 'First Interview Exit'].value_counts().sort_index()
+    second_interview_summary = df.loc[pd.notna(
+        df['Second Interview']), 'Second Interview Exit'].value_counts().sort_index()
+    third_interview_summary = df.loc[pd.notna(
+        df['Third Interview']), 'Third Interview Exit'].value_counts().sort_index()
+
+    return (application_summary, screening_summary, first_interview_summary,
+            second_interview_summary, third_interview_summary)
 
 
 def create_sankey_df(application_summary, screening_summary, first_interview_summary, second_interview_summary, third_interview_summary):
@@ -166,25 +145,35 @@ def create_sankey_df(application_summary, screening_summary, first_interview_sum
     return pd.DataFrame({'Source': sources, 'Target': targets, 'Value': values})
 
 
-def generate_sankey_image(data, format='svg'):
+def generate_sankey_image(data, filename, format='svg'):
     """
     Generate and save a Sankey diagram as an image.
 
     Args:
         data (pd.DataFrame): DataFrame containing sources, targets, and values for the Sankey diagram.
-        format (str): The image format to save (default is 'svg').
+        filename (str): Path of the image to write.
+        format (str): The image format to save, 'svg' or 'png' (default is 'svg').
 
     Returns:
         None
     """
     # Prepare data
-    labels = list(set(data['Source']).union(set(data['Target'])))
+    # Keep first-seen order so node placement is the same on every run
+    labels = list(dict.fromkeys(
+        list(data['Source']) + list(data['Target'])))
     label_indices = {label: i for i, label in enumerate(labels)}
 
     # Create sources, targets, and values arrays for Plotly
     sources = data['Source'].map(label_indices).tolist()
     targets = data['Target'].map(label_indices).tolist()
     values = data['Value'].tolist()
+
+    # Plotly only shows node totals on hover, so print them in the label as SankeyMATIC does.
+    # A node's total is its larger side: inflow for outcomes, outflow for the first stage
+    inflow = data.groupby('Target')['Value'].sum()
+    outflow = data.groupby('Source')['Value'].sum()
+    display_labels = [f"{label} {max(inflow.get(label, 0), outflow.get(label, 0))}"
+                      for label in labels]
 
     # Generate a list of colors with 50% opacity
     color_palette = [
@@ -214,7 +203,7 @@ def generate_sankey_image(data, format='svg'):
             pad=15,
             thickness=20,
             line=dict(color="black", width=0.5),
-            label=labels
+            label=display_labels
         ),
         link=dict(
             source=sources,
@@ -224,53 +213,20 @@ def generate_sankey_image(data, format='svg'):
         ))])
 
     fig.update_layout(title_text="", font_size=10)
-    filename = f'sankey_diagram.{format}'
     # Save as an image in the chosen format
-    fig.write_image(filename)
+    # PNG is rendered at 4x so text and links stay sharp
+    scale = 1 if format == 'svg' else 4
+    fig.write_image(filename, format=format, width=1200, height=700, scale=scale)
     print(f"Sankey diagram saved as {filename}")
 
 
-def output_picker(final_output):
-    """
-    Allow the user to select the output format for the final result.
-
-    Args:
-        final_output (list): List of formatted output strings.
-
-    Returns:
-        None
-    """
-    print("Select output format:")
-    print("1: Console")
-    print("2: Output file (sankeymatic_markup.txt)")
-    print("3: Plotly diagram (Image)")
-    choice = input("Enter choice (1, 2, or 3): ")
-
-    if (choice == '1'):
-        # Print to console
-        for output in final_output:
-            print(output)
-    elif (choice == '2'):
-        # Write to file
-        with open('sankeymatic_markup.txt', 'w') as file:
-            for output in final_output:
-                file.write(output + '\n')
-        print("Output written to sankeymatic_markup.txt.")
-    elif (choice == '3'):
-        # Choose image format for Plotly diagram
-        print("Choose the image format:")
-        print("1: SVG")
-        print("2: PNG")
-        print("3: JPG")
-        format_choice = input("Enter choice (1, 2, or 3): ")
-        format_dict = {'1': 'svg', '2': 'png', '3': 'jpg'}
-        # Default to SVG if invalid choice
-        format = format_dict.get(format_choice, 'svg')
-        df_sankey = create_sankey_df(
-            application_summary, screening_summary, first_interview_summary, second_interview_summary, third_interview_summary)
-        generate_sankey_image(df_sankey, format)
+def main():
+    args = Args().parse_args()
+    output = args.output or f'sankey_diagram.{args.format}'
+    df = load_applications(args.input_paths)
+    df_sankey = create_sankey_df(*summarize_stages(df))
+    generate_sankey_image(df_sankey, output, args.format)
 
 
-# Main execution block
 if __name__ == "__main__":
-    output_picker(final_output)
+    main()
