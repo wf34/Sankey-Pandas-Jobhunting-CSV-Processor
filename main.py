@@ -20,129 +20,79 @@ def load_applications(input_paths):
     """
     Load and combine application rows from CSV or TSV files.
 
+    Expected columns: with_take_home_assignment (0/1), done_assignment (0/1),
+    total_interviews (int, counts every call including the first HR call and the
+    take-home review call) and outcome. Other columns, e.g. company_name and
+    industry, are kept in the data but not plotted.
+
     Args:
         input_paths (list[str]): Paths to the input files; '.tsv' files are read as tab-separated.
 
     Returns:
-        pd.DataFrame: One row per application, without 'Diary Update' rows.
+        pd.DataFrame: One row per application.
     """
     frames = [pd.read_csv(path, sep='\t' if path.lower().endswith('.tsv') else ',')
               for path in input_paths]
     df = pd.concat(frames, ignore_index=True)
 
-    # Stage columns are optional; a missing one means no application reached that stage
-    for stage_column in ['Screening Date', 'First Interview', 'Second Interview', 'Third Interview']:
-        if stage_column not in df.columns:
-            df[stage_column] = pd.NA
-
-    # Normalize column data to title case
-    df['Outcome'] = df['Outcome'].str.title().fillna('Pending')
-
-    # Filter out 'Diary Update' from 'Outcome'
-    return df[df['Outcome'] != 'Diary Update'].copy()
+    df['with_take_home_assignment'] = df['with_take_home_assignment'].fillna(0).astype(int).astype(bool)
+    df['done_assignment'] = df['done_assignment'].fillna(0).astype(int).astype(bool)
+    df['total_interviews'] = df['total_interviews'].fillna(0).astype(int)
+    # Outcomes are whatever the input contains, normalized to title case
+    df['outcome'] = df['outcome'].str.strip().str.title().fillna('Pending')
+    return df
 
 
-def determine_transition(row):
+def application_path(row):
     """
-    Determine the transition based on the screening date.
+    List the stages one application went through, ending with its outcome.
+
+    The first interview is the HR or hiring manager call. A take-home task comes after
+    the other interviews, and when it was done its review call is the last interview.
+    Placing the task at the same point for every application keeps the diagram acyclic.
 
     Args:
         row (pd.Series): A row from the DataFrame.
 
     Returns:
-        str: The determined transition.
+        list[str]: Stage names from 'Application' to the outcome.
     """
-    # Determine the transition based on screening date being non null value
-    if pd.notna(row['Screening Date']):
-        return 'Screening'
-    return row['Outcome']
+    total = row['total_interviews']
+    if row['done_assignment'] and not row['with_take_home_assignment']:
+        raise ValueError(f"{row.get('company_name')}: done_assignment without with_take_home_assignment")
+    if row['done_assignment'] and total < 2:
+        raise ValueError(f"{row.get('company_name')}: a done take-home needs the HR call and a review call, "
+                         f"but total_interviews is {total}")
+
+    # Interviews numbered 2 and on, excluding the review call
+    numbered_interviews = total - 1 - int(row['done_assignment']) if total else 0
+    path = ['Application']
+    if total >= 1:
+        path.append('HR or Hiring Manager Call')
+    path += [f'Interview {number}' for number in range(2, 2 + numbered_interviews)]
+    if row['with_take_home_assignment']:
+        path.append('Take-Home Task')
+    if row['done_assignment']:
+        path.append('Take-Home Task Review Call')
+    path.append(row['outcome'])
+    return path
 
 
-def summarize_stages(df):
+def create_sankey_df(df):
     """
-    Count where applications go after each stage.
+    Create a DataFrame for Sankey diagram data.
 
     Args:
         df (pd.DataFrame): Application rows as returned by load_applications.
 
     Returns:
-        tuple[pd.Series, ...]: Exit counts for application, screening and the first, second and third interviews.
-    """
-    # Apply transition determination across the DataFrame
-    df['Application Exit'] = df.apply(determine_transition, axis=1)
-    df['Screening Exit'] = df.apply(lambda row: 'First Interview' if pd.notna(
-        row['First Interview']) else row['Outcome'], axis=1)
-    df['First Interview Exit'] = df.apply(lambda row: 'Second Interview' if pd.notna(
-        row['Second Interview']) else row['Outcome'], axis=1)
-    df['Second Interview Exit'] = df.apply(lambda row: 'Third Interview' if pd.notna(
-        row['Third Interview']) else row['Outcome'], axis=1)
-    df['Third Interview Exit'] = df['Outcome']
-
-    # Count transitions for various stages
-    application_summary = df['Application Exit'].value_counts().sort_index()
-    screening_summary = df.loc[pd.notna(
-        df['Screening Date']), 'Screening Exit'].value_counts().sort_index()
-    first_interview_summary = df.loc[pd.notna(
-        df['First Interview']), 'First Interview Exit'].value_counts().sort_index()
-    second_interview_summary = df.loc[pd.notna(
-        df['Second Interview']), 'Second Interview Exit'].value_counts().sort_index()
-    third_interview_summary = df.loc[pd.notna(
-        df['Third Interview']), 'Third Interview Exit'].value_counts().sort_index()
-
-    return (application_summary, screening_summary, first_interview_summary,
-            second_interview_summary, third_interview_summary)
-
-
-def create_sankey_df(application_summary, screening_summary, first_interview_summary, second_interview_summary, third_interview_summary):
-    """
-    Create a DataFrame for Sankey diagram data.
-
-    Args:
-        application_summary (pd.Series): Summary of application exits.
-        screening_summary (pd.Series): Summary of screening exits.
-        first_interview_summary (pd.Series): Summary of first interview exits.
-        second_interview_summary (pd.Series): Summary of second interview exits.
-        third_interview_summary (pd.Series): Summary of third interview exits.
-
-    Returns:
         pd.DataFrame: DataFrame containing sources, targets, and values for the Sankey diagram.
     """
-    # Initialize lists to build DataFrame
-    sources = []
-    targets = []
-    values = []
-
-    # Application to Screening/Outcome
-    for key, value in application_summary.items():
-        sources.append('Application')
-        targets.append(key)
-        values.append(value)
-
-    # Screening to First Interview/Outcome
-    for key, value in screening_summary.items():
-        sources.append('Screening')
-        targets.append(key)
-        values.append(value)
-
-    # First Interview to Second Interview/Outcome
-    for key, value in first_interview_summary.items():
-        sources.append('First Interview')
-        targets.append(key)
-        values.append(value)
-
-    # Second Interview to Third Interview/Outcome
-    for key, value in second_interview_summary.items():
-        sources.append('Second Interview')
-        targets.append(key)
-        values.append(value)
-
-    # Third Interview to Outcome
-    for key, value in third_interview_summary.items():
-        sources.append('Third Interview')
-        targets.append(key)
-        values.append(value)
-
-    return pd.DataFrame({'Source': sources, 'Target': targets, 'Value': values})
+    steps = [(source, target)
+             for path in df.apply(application_path, axis=1)
+             for source, target in zip(path, path[1:])]
+    links = pd.DataFrame(steps, columns=['Source', 'Target'])
+    return links.groupby(['Source', 'Target'], sort=False).size().reset_index(name='Value')
 
 
 def generate_sankey_image(data, filename, format='svg'):
@@ -226,7 +176,7 @@ def main():
     args = Args().parse_args()
     output = args.output or f'sankey_diagram.{args.format}'
     df = load_applications(args.input_paths)
-    df_sankey = create_sankey_df(*summarize_stages(df))
+    df_sankey = create_sankey_df(df)
     generate_sankey_image(df_sankey, output, args.format)
 
 

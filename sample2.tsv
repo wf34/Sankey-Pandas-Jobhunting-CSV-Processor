@@ -1,0 +1,5 @@
+company_name	industry	with_take_home_assignment	done_assignment	total_interviews	outcome
+c1	self-driving	0	0	2	rejected
+c2	robotics	0	0	4	stopped
+c3	simulation	1	1	5	offer
+c4	artificial int	1	0	2	stopped
