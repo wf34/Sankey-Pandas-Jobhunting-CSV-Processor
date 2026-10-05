@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import math
 import re
 import xml.etree.ElementTree as ET
 from typing import Literal
@@ -108,8 +109,6 @@ def create_sankey_df(df):
 PLOT_WIDTH, PLOT_HEIGHT = 1040, 520
 # Blank space kept around the diagram
 PADDING = 2
-# Height of a two-line label with its backdrop
-LABEL_HEIGHT = 30
 SVG_NS = '{http://www.w3.org/2000/svg}'
 
 
@@ -179,24 +178,100 @@ def image_size(margin):
                 height=PLOT_HEIGHT + margin['t'] + margin['b'])
 
 
-def fit_margin(boxes):
+def label_rectangle(annotation, size):
+    """
+    Locate a label in the plot area.
+
+    Args:
+        annotation (dict): A label as returned by label_annotations.
+        size (tuple[float, float]): Its size as returned by measure_labels.
+
+    Returns:
+        tuple[float, float, float, float]: (left, top, width, height) in pixels, relative
+        to the top-left corner of the plot area.
+    """
+    width, height = size
+    anchor_x = annotation['x'] * PLOT_WIDTH
+    left = anchor_x - width if annotation['xanchor'] == 'right' else anchor_x
+    top = (1 - annotation['y']) * PLOT_HEIGHT - height / 2
+    return left, top, width, height
+
+
+def separate_labels(annotations, sizes):
+    """
+    Move overlapping labels apart vertically, each by half of the overlap.
+
+    Args:
+        annotations (list[dict]): Labels as returned by label_annotations; changed in place.
+        sizes (list[tuple[float, float]]): Label sizes as returned by measure_labels.
+
+    Returns:
+        None
+    """
+    # Moving one pair apart can push a label into a third one, so repeat a few times
+    for _ in range(10):
+        moved = False
+        for first in range(len(annotations)):
+            for second in range(first + 1, len(annotations)):
+                left_1, top_1, width_1, height_1 = label_rectangle(annotations[first], sizes[first])
+                left_2, top_2, width_2, height_2 = label_rectangle(annotations[second], sizes[second])
+                if left_1 >= left_2 + width_2 or left_2 >= left_1 + width_1:
+                    continue
+                upper, lower = (first, second) if top_1 <= top_2 else (second, first)
+                overlap = min(top_1 + height_1, top_2 + height_2) - max(top_1, top_2)
+                if overlap <= 0:
+                    continue
+                annotations[upper]['y'] += overlap / 2 / PLOT_HEIGHT
+                annotations[lower]['y'] -= overlap / 2 / PLOT_HEIGHT
+                moved = True
+        if not moved:
+            break
+
+
+def fit_margin(annotations, sizes):
     """
     Find the smallest margins that still fit the labels.
 
-    A label is centered on its node and can be taller than it, so the labels of short
-    nodes at the top or bottom edge stick out of the plot area.
+    The labels of the first and last column lie outside the plot area, and a label can
+    be taller than its node, so labels stick out of the plot area on every side.
 
     Args:
-        boxes (dict): Node boxes as returned by measure_nodes.
+        annotations (list[dict]): Labels as returned by label_annotations.
+        sizes (list[tuple[float, float]]): Label sizes as returned by measure_labels.
 
     Returns:
         dict[str, int]: Plotly margin with l, r, t and b in pixels.
     """
-    centers = [y + height / 2 for _, y, _, height in boxes.values()]
-    overflow_top = max(0, LABEL_HEIGHT / 2 - min(centers))
-    overflow_bottom = max(0, max(centers) + LABEL_HEIGHT / 2 - PLOT_HEIGHT)
-    return dict(l=PADDING, r=PADDING,
-                t=PADDING + round(overflow_top), b=PADDING + round(overflow_bottom))
+    overflow = dict(l=0, r=0, t=0, b=0)
+    for annotation, size in zip(annotations, sizes):
+        left, top, width, height = label_rectangle(annotation, size)
+        overflow['l'] = max(overflow['l'], -left)
+        overflow['r'] = max(overflow['r'], left + width - PLOT_WIDTH)
+        overflow['t'] = max(overflow['t'], -top)
+        overflow['b'] = max(overflow['b'], top + height - PLOT_HEIGHT)
+    return {side: PADDING + math.ceil(extra) for side, extra in overflow.items()}
+
+
+def measure_labels(fig):
+    """
+    Find the size Plotly gives each annotation by rendering the figure to SVG.
+
+    Args:
+        fig (go.Figure): Figure with the label annotations.
+
+    Returns:
+        list[tuple[float, float]]: (width, height) in pixels of each annotation's
+        backdrop, in the order of the annotations.
+    """
+    svg = ET.fromstring(fig.to_image(format='svg', **image_size(fig.layout.margin)))
+    sizes = {}
+    for group in svg.iter(f'{SVG_NS}g'):
+        if group.get('class') != 'annotation':
+            continue
+        rect = next(group.iter(f'{SVG_NS}rect'))
+        # The backdrop has a 1px outline, drawn half inside the rectangle and half outside
+        sizes[int(group.get('data-index'))] = (float(rect.get('width')) + 1, float(rect.get('height')) + 1)
+    return [sizes[index] for index in sorted(sizes)]
 
 
 def measure_nodes(fig):
@@ -226,7 +301,9 @@ def label_annotations(boxes, labels):
     """
     Build node labels as annotations on a half-transparent white background.
 
-    Labels sit right of their node, except in the last column where they sit left of it.
+    Labels sit left of their node, where the flows arriving at it end, so a label can't be
+    read as belonging to the next node. Only the outcomes in the last column have their
+    label on the right, outside the diagram.
 
     Args:
         boxes (dict): Node boxes as returned by measure_nodes.
@@ -243,11 +320,12 @@ def label_annotations(boxes, labels):
         annotations.append(dict(
             text=labels[index],
             xref='paper', yref='paper',
-            x=(x - gap if in_last_column else x + width + gap) / PLOT_WIDTH,
+            x=(x + width + gap if in_last_column else x - gap) / PLOT_WIDTH,
             y=1 - (y + height / 2) / PLOT_HEIGHT,
-            xanchor='right' if in_last_column else 'left',
+            xanchor='left' if in_last_column else 'right',
             yanchor='middle',
-            align='left',
+            # Text lines up along the side facing the node
+            align='left' if in_last_column else 'right',
             showarrow=False,
             bgcolor='rgba(255,255,255,0.5)',
             borderpad=3,
@@ -316,8 +394,12 @@ def generate_sankey_image(data, filename, format='svg', scale=2):
     boxes = measure_nodes(fig)
     fig.update_traces(node_label=[''] * len(labels))
     # The plot area keeps its size when the margins change, so the measured boxes stay valid
-    margin = fit_margin(boxes)
-    fig.update_layout(annotations=label_annotations(boxes, display_labels), margin=margin)
+    annotations = label_annotations(boxes, display_labels)
+    fig.update_layout(annotations=annotations)
+    sizes = measure_labels(fig)
+    separate_labels(annotations, sizes)
+    margin = fit_margin(annotations, sizes)
+    fig.update_layout(annotations=annotations, margin=margin)
 
     # Save as an image in the chosen format
     fig.write_image(filename, format=format, scale=1 if format == 'svg' else scale, **image_size(margin))
