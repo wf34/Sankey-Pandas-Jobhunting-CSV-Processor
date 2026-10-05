@@ -102,6 +102,58 @@ MARGIN = dict(l=80, r=80, t=100, b=80)
 SVG_NS = '{http://www.w3.org/2000/svg}'
 
 
+LINK_OPACITY = 0.5
+
+# Fixed 'r,g,b' colors of the flows into final outcomes, keyed by the title-cased outcome
+OUTCOME_COLORS = {
+    'Offer': '51,160,44',      # Green
+    'Rejected': '227,26,28',   # Red
+    'Ghosted': '128,128,128',  # Gray
+    'Stopped': '255,170,0',    # Amber
+}
+
+# Colors for every other destination; none of them is close to an outcome color
+STAGE_PALETTE = [
+    '31,120,180',   # Blue
+    '106,61,154',   # Purple
+    '0,150,136',    # Teal
+    '197,27,138',   # Magenta
+    '177,89,40',    # Brown
+    '23,190,207',   # Cyan
+    '63,81,181',    # Indigo
+    '247,129,191',  # Pink
+    '166,206,227',  # Pale Blue
+    '202,178,214',  # Pale Purple
+    '128,203,196',  # Pale Teal
+    '177,179,0',    # Olive
+]
+
+
+def assign_target_colors(targets):
+    """
+    Pick one color per destination node, shared by all links flowing into it.
+
+    Outcomes listed in OUTCOME_COLORS get their fixed color. The other destinations take
+    palette colors in order, so the colors are the same on every run.
+
+    Args:
+        targets (list[str]): Unique destination node names.
+
+    Returns:
+        dict[str, str]: Node name to an 'r,g,b' color.
+    """
+    colors = {}
+    palette_position = 0
+    for target in targets:
+        if target in OUTCOME_COLORS:
+            colors[target] = OUTCOME_COLORS[target]
+        else:
+            # Cycle through the palette if there are more destinations than colors
+            colors[target] = STAGE_PALETTE[palette_position % len(STAGE_PALETTE)]
+            palette_position += 1
+    return colors
+
+
 def measure_nodes(fig):
     """
     Find where Plotly places each node by rendering the figure to SVG.
@@ -190,27 +242,11 @@ def generate_sankey_image(data, filename, format='svg'):
     display_labels = [f"{label}<br>total: {max(inflow.get(label, 0), outflow.get(label, 0))}"
                       for label in labels]
 
-    # Generate a list of colors with 50% opacity
-    color_palette = [
-        'rgba(166,206,227,0.5)',  # Pale Blue
-        'rgba(31,120,180,0.5)',   # Strong Blue
-        'rgba(178,223,138,0.5)',  # Pale Green
-        'rgba(51,160,44,0.5)',    # Strong Green
-        'rgba(251,154,153,0.5)',  # Pale Red
-        'rgba(227,26,28,0.5)',    # Strong Red
-        'rgba(253,191,111,0.5)',  # Pale Orange
-        'rgba(255,127,0,0.5)',    # Strong Orange
-        'rgba(202,178,214,0.5)',  # Pale Purple
-        'rgba(106,61,154,0.5)',   # Strong Purple
-        'rgba(255,255,153,0.5)',  # Light Yellow
-        'rgba(177,89,40,0.5)',    # Dark Brown
-        'rgba(0,0,0,0.5)',        # Black
-        'rgba(177,179,0,0.5)'     # Olive
-    ]
+    target_colors = assign_target_colors(list(dict.fromkeys(data['Target'])))
 
-    # Cycle through the color palette if there are more links than colors
-    link_colors = [color_palette[i % len(color_palette)]
-                   for i in range(len(sources))]
+    # Links are colored by their destination, so everything arriving at a node reads as one flow
+    link_colors = [f'rgba({target_colors[target]},{LINK_OPACITY})'
+                   for target in data['Target']]
 
     # Create the Sankey diagram
     fig = go.Figure(data=[go.Sankey(
