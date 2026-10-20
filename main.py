@@ -78,12 +78,12 @@ def application_path(row):
     numbered_interviews = total - 1 - int(row['done_assignment']) if total else 0
     path = ['Application']
     if total >= 1:
-        path.append('HR or Hiring Manager Call')
+        path.append('HR/Hiring Manager')
     path += [f'Interview #{number}' for number in range(2, 2 + numbered_interviews)]
     if row['with_take_home_assignment']:
         path.append('Take-Home Task')
     if row['done_assignment']:
-        path.append('Take-Home Task Review Call')
+        path.append('Take-Home Task Review')
     path.append(row['outcome'])
     return path
 
@@ -113,6 +113,16 @@ SVG_NS = '{http://www.w3.org/2000/svg}'
 
 
 LINK_OPACITY = 0.5
+
+# Stages whose label sits higher than their node's middle, where it would cover the flows branching off
+RAISED_LABELS = {f'Interview #{number}' for number in range(4, 9)} | {'Take-Home Task', 'Take-Home Task Review'}
+
+
+# Labels split over lines so they fit between their node and the previous column
+LABEL_TEXT = {
+    'Take-Home Task Review': 'Take-Home<br>Task Review',
+}
+
 
 # Fixed 'r,g,b' colors of the flows into final outcomes, keyed by the outcome as displayed
 OUTCOME_COLORS = {
@@ -195,6 +205,24 @@ def label_rectangle(annotation, size):
     left = anchor_x - width if annotation['xanchor'] == 'right' else anchor_x
     top = (1 - annotation['y']) * PLOT_HEIGHT - height / 2
     return left, top, width, height
+
+
+def raise_labels(annotations, sizes, names):
+    """
+    Move the labels of the stages in RAISED_LABELS up, so their bottom edge is level with
+    the middle of their node instead of the label being centered on it.
+
+    Args:
+        annotations (list[dict]): Labels as returned by label_annotations; changed in place.
+        sizes (list[tuple[float, float]]): Label sizes as returned by measure_labels.
+        names (list[str]): Stage name of each label, in the order of the annotations.
+
+    Returns:
+        None
+    """
+    for annotation, (_, height), name in zip(annotations, sizes, names):
+        if name in RAISED_LABELS:
+            annotation['y'] += height / PLOT_HEIGHT
 
 
 def separate_labels(annotations, sizes):
@@ -361,7 +389,7 @@ def generate_sankey_image(data, filename, format='svg', scale=2):
     # A node's total is its larger side: inflow for outcomes, outflow for the first stage
     inflow = data.groupby('Target')['Value'].sum()
     outflow = data.groupby('Source')['Value'].sum()
-    display_labels = [f"{label}<br>total: {max(inflow.get(label, 0), outflow.get(label, 0))}"
+    display_labels = [f"{LABEL_TEXT.get(label, label)}<br>total: {max(inflow.get(label, 0), outflow.get(label, 0))}"
                       for label in labels]
 
     target_colors = assign_target_colors(list(dict.fromkeys(data['Target'])))
@@ -397,6 +425,8 @@ def generate_sankey_image(data, filename, format='svg', scale=2):
     annotations = label_annotations(boxes, display_labels)
     fig.update_layout(annotations=annotations)
     sizes = measure_labels(fig)
+    # Annotations follow the order of the measured boxes, not of the labels
+    raise_labels(annotations, sizes, [labels[index] for index in boxes])
     separate_labels(annotations, sizes)
     margin = fit_margin(annotations, sizes)
     fig.update_layout(annotations=annotations, margin=margin)
